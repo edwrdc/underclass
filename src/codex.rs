@@ -452,7 +452,13 @@ impl Backend for CodexBackend {
     }
 }
 
+/// @cc [owner:edwrdc,label:catalog] codex-default-model-limits
+/// The default catalog MUST include GPT-6 Luna, GPT-6.1 Sol/Terra, and both Daybreak models.
+/// GPT-6.1 entries MUST advertise 500,000 context/input tokens and 128,000 output tokens.
+/// Existing older model IDs MUST remain available for clients that still select them.
 pub fn default_catalog() -> Vec<crate::models::ModelInfo> {
+    // Limits follow Codex Conversion 4.0.5's effective model catalog; older entries stay unchanged.
+    // Use its contextWindow as the context/input ceiling, without adding the output allowance.
     let entries: &[(&str, &str, i64, i64, i64)] = &[
         ("gpt-5.4", "GPT-5.4", 400_000, 272_000, 128_000),
         ("gpt-5.4-mini", "GPT-5.4 Mini", 400_000, 272_000, 128_000),
@@ -464,11 +470,28 @@ pub fn default_catalog() -> Vec<crate::models::ModelInfo> {
             128_000,
         ),
         ("gpt-5.5", "GPT-5.5", 400_000, 272_000, 128_000),
-        ("gpt-5.6-sol", "GPT-5.6 Sol", 400_000, 272_000, 128_000),
-        ("gpt-5.6-terra", "GPT-5.6 Terra", 400_000, 272_000, 128_000),
-        ("gpt-5.6-luna", "GPT-5.6 Luna", 400_000, 272_000, 128_000),
-        ("gpt-6-astra", "GPT-6 Astra", 400_000, 272_000, 128_000),
-        ("gpt-6-sol", "GPT-6 Sol", 1_050_000, 922_000, 128_000),
+        ("gpt-5.6-sol", "GPT-5.6 Sol", 272_000, 272_000, 128_000),
+        ("gpt-5.6-terra", "GPT-5.6 Terra", 272_000, 272_000, 128_000),
+        ("gpt-5.6-luna", "GPT-5.6 Luna", 272_000, 272_000, 128_000),
+        ("gpt-6-astra", "GPT-6 Astra", 272_000, 272_000, 128_000),
+        ("gpt-6-luna", "GPT-6 Luna", 272_000, 272_000, 128_000),
+        ("gpt-6-sol", "GPT-6 Sol", 272_000, 272_000, 128_000),
+        ("gpt-6.1-sol", "GPT-6.1 Sol", 500_000, 500_000, 128_000),
+        ("gpt-6.1-terra", "GPT-6.1 Terra", 500_000, 500_000, 128_000),
+        (
+            "gpt-daybreak-blue-latest",
+            "Daybreak Blue",
+            272_000,
+            272_000,
+            128_000,
+        ),
+        (
+            "gpt-daybreak-red-latest",
+            "Daybreak Red",
+            372_000,
+            372_000,
+            128_000,
+        ),
     ];
     entries
         .iter()
@@ -578,14 +601,33 @@ mod tests {
     }
 
     #[test]
-    fn default_catalog_includes_gpt_6_sol_limits() {
-        let model = default_catalog()
-            .into_iter()
-            .find(|model| model.id == "gpt-6-sol")
-            .expect("gpt-6-sol must be in the default catalog");
-        assert_eq!(model.context, 1_050_000);
-        assert_eq!(model.input, 922_000);
-        assert_eq!(model.output, 128_000);
+    fn default_catalog_matches_codex_conversion_limits_and_retains_older_models() {
+        let catalog = default_catalog();
+        let expected = [
+            ("gpt-5.4", 400_000, 272_000),
+            ("gpt-5.4-mini", 400_000, 272_000),
+            ("gpt-5.3-codex-spark", 400_000, 272_000),
+            ("gpt-5.5", 400_000, 272_000),
+            ("gpt-5.6-sol", 272_000, 272_000),
+            ("gpt-5.6-terra", 272_000, 272_000),
+            ("gpt-5.6-luna", 272_000, 272_000),
+            ("gpt-6-astra", 272_000, 272_000),
+            ("gpt-6-luna", 272_000, 272_000),
+            ("gpt-6-sol", 272_000, 272_000),
+            ("gpt-6.1-sol", 500_000, 500_000),
+            ("gpt-6.1-terra", 500_000, 500_000),
+            ("gpt-daybreak-blue-latest", 272_000, 272_000),
+            ("gpt-daybreak-red-latest", 372_000, 372_000),
+        ];
+        assert_eq!(catalog.len(), expected.len());
+        for (id, context, input) in expected {
+            let model = catalog.iter().find(|model| model.id == id).expect(id);
+            assert_eq!(
+                (model.context, model.input, model.output),
+                (context, input, 128_000),
+                "{id}"
+            );
+        }
     }
 
     #[test]
