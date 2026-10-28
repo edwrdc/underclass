@@ -397,20 +397,35 @@ impl Backend for CodexBackend {
         }
     }
 
-    /// @cc [owner:ghuntley,label:auth] codex-header-injection
+    /// @cc [owner:edwrdc,label:auth] codex-header-injection
     /// Outbound Codex requests MUST carry `Authorization: Bearer <account access token>`, and,
     /// when known on the account, the `ChatGPT-Account-Id` and
     /// `x-openai-internal-codex-residency` headers, plus `originator: opencode`. No
     /// client-supplied credential may survive into these headers.
+    ///
+    /// A non-empty sticky key valid as an HTTP header value MUST be sent as `session-id`.
+    /// Missing, empty, or invalid sticky keys MUST NOT produce a `session-id` header.
+    ///
+    /// Only client `x-codex-beta-features` and `x-openai-internal-codex-responses-lite`
+    /// headers MUST be copied verbatim into Codex requests. Missing headers MUST NOT be invented,
+    /// and all other client headers MUST remain excluded from this injection.
     fn inject_headers(
         &self,
         account: &Account,
         token: &str,
-        _sticky: Option<&str>,
+        sticky: Option<&str>,
         _body: &Value,
-        _client: &HeaderMap,
+        client: &HeaderMap,
         headers: &mut HeaderMap,
     ) {
+        for name in [
+            "x-codex-beta-features",
+            "x-openai-internal-codex-responses-lite",
+        ] {
+            if let Some(value) = client.get(name) {
+                headers.insert(name, value.clone());
+            }
+        }
         headers.insert(
             http::header::AUTHORIZATION,
             http::HeaderValue::from_str(&format!("Bearer {token}")).expect("bearer"),
@@ -426,6 +441,11 @@ impl Backend for CodexBackend {
             }
         }
         headers.insert("originator", http::HeaderValue::from_static("opencode"));
+        if let Some(sticky) = sticky.filter(|key| !key.is_empty()) {
+            if let Ok(value) = http::HeaderValue::from_str(sticky) {
+                headers.insert("session-id", value);
+            }
+        }
         if let Ok(v) = http::HeaderValue::from_str(USER_AGENT) {
             headers.insert(http::header::USER_AGENT, v);
         }
@@ -590,5 +610,29 @@ mod tests {
             "eu"
         );
         assert_eq!(headers.get("originator").unwrap(), "opencode");
+    }
+
+    #[test]
+    fn forwards_only_valid_sticky_keys_as_session_id() {
+        let backend = CodexBackend { cooldown_ms: 1000 };
+        let account = crate::flows::new_account(crate::models::BackendId::Codex, "x".into());
+        for sticky in [None, Some(""), Some("bad\nvalue"), Some("cache-abc")] {
+            let mut headers = HeaderMap::new();
+            backend.inject_headers(
+                &account,
+                "tok",
+                sticky,
+                &Value::Null,
+                &HeaderMap::new(),
+                &mut headers,
+            );
+            assert_eq!(
+                headers
+                    .get("session-id")
+                    .and_then(|value| value.to_str().ok()),
+                sticky.filter(|key| *key == "cache-abc"),
+            );
+            assert_eq!(headers.get("authorization").unwrap(), "Bearer tok");
+        }
     }
 }

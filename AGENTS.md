@@ -45,7 +45,7 @@ cargo run -- stats import-codex [--dry-run]  # backfill capacity/policy errors f
 Use the `code-contracts` skill for every code change and code review. Follow its contract discovery, writing, and enforcement procedures before submitting commits or pull requests.
 
 - Repo-wide rules live in [`CONTRACTS`](CONTRACTS); declaration contracts use `/// @cc` doc comments on the narrowest relevant function.
-- `owner` is the account's GitHub username (`ghuntley`); never add `notify` unless explicitly requested.
+- Use `owner:edwrdc` for new or changed contracts in this fork; leave unrelated upstream ownership unchanged. Never add `notify` unless explicitly requested.
 - Validate syntax and duplicate IDs with `cc-check format` (npm `@spolu/cc-check`); there is no automated semantic enforcement — verify prose against the implementation for every touched contract.
 
 ## ADR policy

@@ -26,6 +26,7 @@ struct MockState {
     /// Remaining 403 responses to serve per bearer token, modelling a redemption-triggered
     /// credential rejection that a token refresh clears.
     forbidden: std::collections::HashMap<String, u32>,
+    seen: Vec<(axum::http::HeaderMap, serde_json::Value)>,
 }
 
 async fn mock_responses(
@@ -41,6 +42,8 @@ async fn mock_responses(
         .unwrap_or("unknown")
         .to_string();
     let wants_stream = body.contains("\"stream\": true") || body.contains("\"stream\":true");
+    let parsed = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    state.lock().unwrap().seen.push((headers.clone(), parsed));
 
     if bearer.starts_with("bad-") {
         return (
@@ -1074,6 +1077,95 @@ async fn e2e_enable_clears_auth_error_but_preserves_quota_cooldown() {
         cooling.reset_at, deadline,
         "enable must preserve an upstream quota deadline"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_forwards_codex_session_and_feature_headers() {
+    let mock = mock_upstream();
+    let store = Arc::new(Store::in_memory().unwrap());
+    store.set_catalog(BackendId::Codex, &[model("gpt-5.5")]);
+    store.upsert_account(&codex_account("acc-sess", "tok-session"));
+    let (base, _logs) = spawn_app(store, 400).await;
+    let http = reqwest::Client::new();
+
+    // The resolved body key wins over the client's session-id.
+    let response = http.post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer test-key")
+        .header("session-id", "client-supplied")
+        .header("x-codex-beta-features", "remote_compaction_v2,another_feature")
+        .header("x-openai-internal-codex-responses-lite", "true")
+        .header("ChatGPT-Account-Id", "forged-account")
+        .header("x-openai-internal-codex-residency", "forged-residency")
+        .header("originator", "forged-originator")
+        .header("cookie", "must-not-forward")
+        .header("x-not-allowed", "must-not-forward")
+        .json(&serde_json::json!({"model": "gpt-5.5", "input": [{"type": "compaction_trigger"}], "prompt_cache_key": "cache-codex-forwarding"}))
+        .send().await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let response = http
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer test-key")
+        .json(&serde_json::json!({"model": "gpt-5.5", "input": "codex-no-sticky-marker"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let seen = mock.lock().unwrap().seen.clone();
+    let (headers, body) = seen
+        .iter()
+        .find(|(_, body)| body["prompt_cache_key"] == "cache-codex-forwarding")
+        .expect("mock upstream saw the sticky request");
+    assert_eq!(headers.get("session-id").unwrap(), "cache-codex-forwarding");
+    assert_eq!(
+        headers.get("x-codex-beta-features").unwrap(),
+        "remote_compaction_v2,another_feature"
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-codex-responses-lite")
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(headers.get("authorization").unwrap(), "Bearer tok-session");
+    assert_eq!(
+        headers.get("chatgpt-account-id").unwrap(),
+        "chatgpt-acc-sess"
+    );
+    assert_eq!(headers.get("originator").unwrap(), "opencode");
+    for name in [
+        "x-openai-internal-codex-residency",
+        "cookie",
+        "x-not-allowed",
+    ] {
+        assert!(
+            !headers.contains_key(name),
+            "client {name} must not reach upstream"
+        );
+    }
+    assert_eq!(body["prompt_cache_key"], "cache-codex-forwarding");
+    assert_eq!(
+        body["input"],
+        serde_json::json!([{"type": "compaction_trigger"}])
+    );
+    assert_eq!(body["store"], false);
+
+    let (headers, body) = seen
+        .iter()
+        .find(|(_, body)| body["input"] == "codex-no-sticky-marker")
+        .expect("mock upstream saw the keyless request");
+    for name in [
+        "session-id",
+        "x-codex-beta-features",
+        "x-openai-internal-codex-responses-lite",
+    ] {
+        assert!(
+            !headers.contains_key(name),
+            "missing client {name} must not be invented"
+        );
+    }
+    assert_eq!(body["store"], false);
 }
 
 async fn wait_for_rows(store: &Store, count: usize) -> Vec<underclass::store::UsageRecord> {
