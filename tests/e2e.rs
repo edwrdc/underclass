@@ -249,6 +249,39 @@ async fn mock_responses(
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\"}}\n\n",
         ).into_response();
     }
+    if (bearer.starts_with("tok-abort-") || bearer.starts_with("tok-late-abort-")) && wants_stream {
+        let late = bearer.starts_with("tok-late-abort-");
+        let stream = futures::stream::unfold(0, move |step| async move {
+            match step {
+                0 => Some((
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(if late {
+                        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+                    } else {
+                        b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+                    })),
+                    1,
+                )),
+                1 => {
+                    // Flush headers and the first chunk before breaking the upstream body.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "upstream reset",
+                        )),
+                        2,
+                    ))
+                }
+                _ => None,
+            }
+        });
+        return (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            Body::from_stream(stream),
+        )
+            .into_response();
+    }
     if serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .and_then(|value| value.get("slow_abort").and_then(|flag| flag.as_bool()))
@@ -1249,6 +1282,102 @@ async fn post_stream(base: &str, key: &str) -> (u16, String) {
         .unwrap();
     let status = response.status().as_u16();
     (status, response.text().await.unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_stream_error_before_output_fails_over() {
+    mock_upstream();
+    let store = Arc::new(Store::in_memory().unwrap());
+    store.set_catalog(BackendId::Codex, &[model("gpt-5.5")]);
+    // `ab-a` sorts first, so a new sticky key binds to the account that drops its stream.
+    store.upsert_account(&codex_account("ab-a", "tok-abort-ab-a"));
+    store.upsert_account(&codex_account("ab-b", "tok-ab-b"));
+    let (base, _logs) = spawn_app(store.clone(), 400).await;
+
+    let (status, body) = post_stream(&base, "abort-session").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("hello from tok-ab-b"),
+        "served by the retry: {body}"
+    );
+    assert!(
+        !body.contains("response.created"),
+        "discard the failed preamble"
+    );
+
+    let rows = wait_for_rows(&store, 2).await;
+    assert_eq!(rows.len(), 2, "one attempt per account");
+    let dropped = rows
+        .iter()
+        .find(|r| r.account_id == "ab-a")
+        .expect("aborted attempt recorded");
+    assert_eq!(dropped.stream_outcome.as_deref(), Some("upstream_error"));
+    assert_eq!(dropped.saw_output, Some(false));
+    assert!(
+        store
+            .list_accounts()
+            .iter()
+            .all(|a| a.status == AccountStatus::Healthy)
+    );
+    let (_, body) = post_stream(&base, "abort-session").await;
+    assert!(body.contains("hello from tok-ab-b"));
+    assert_eq!(
+        wait_for_rows(&store, 3).await.len(),
+        3,
+        "sticky rebind persisted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_stream_error_before_output_returns_a_clean_502() {
+    mock_upstream();
+    let store = Arc::new(Store::in_memory().unwrap());
+    store.set_catalog(BackendId::Codex, &[model("gpt-5.5")]);
+    store.upsert_account(&codex_account("ab-a", "tok-abort-ab-a"));
+    store.upsert_account(&codex_account("ab-b", "tok-abort-ab-b"));
+    let (base, _logs) = spawn_app(store.clone(), 400).await;
+
+    // Every attempt drops its stream before output, so the client gets one complete error body
+    // instead of a 200 whose body aborts (which a proxy in front turns into its own 502).
+    let (status, body) = post_stream(&base, "doomed-abort").await;
+    assert_eq!(status, 502);
+    assert!(body.contains("upstream_stream_error"), "{body}");
+    let rows = wait_for_rows(&store, 2).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter()
+            .map(|r| r.account_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["ab-a", "ab-b"])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_stream_error_after_output_is_not_retried() {
+    mock_upstream();
+    let store = Arc::new(Store::in_memory().unwrap());
+    store.set_catalog(BackendId::Codex, &[model("gpt-5.5")]);
+    store.upsert_account(&codex_account("late-ab-a", "tok-late-abort-a"));
+    store.upsert_account(&codex_account("late-ab-b", "tok-healthy-late-b"));
+    let (base, _logs) = spawn_app(store.clone(), 400).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth("test-key")
+        .json(&serde_json::json!({"model":"gpt-5.5","stream":true,"input":"hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.text().await.is_err(),
+        "pass the body error through"
+    );
+    let rows = wait_for_rows(&store, 1).await;
+    assert_eq!(rows.len(), 1, "no second account attempted after output");
+    assert_eq!(rows[0].account_id, "late-ab-a");
+    assert_eq!(rows[0].saw_output, Some(true));
+    assert_eq!(rows[0].stream_outcome.as_deref(), Some("upstream_error"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

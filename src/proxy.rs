@@ -323,20 +323,20 @@ fn attach_request_id(mut resp: Response, request_id: &str) -> Response {
 enum Attempt {
     Respond(Response),
     Failover(Option<Response>),
-    /// The stream failed with a capacity code before any output; `replay` holds what upstream
-    /// sent, for the client if no other account succeeds.
-    Overloaded {
+    /// The 2xx stream died before any output; the account is excluded for the rest of the request
+    /// and `replay` is what the client gets if no other account succeeds.
+    Excluded {
         account_id: String,
         replay: Response,
     },
 }
 
-/// @cc [owner:ghuntley,label:proxy] saturation-fail-fast-429
+/// @cc [owner:edwrdc,label:proxy] saturation-fail-fast-429
 /// When selection returns `Saturated`, `infer` MUST first make one automatic Codex reset attempt
 /// for a live Codex-pool outage, then select again. If no account recovers, it MUST respond with
 /// 429 and `Retry-After` equal to the seconds until `until_ms`. Exception: once an account has
-/// been excluded for an overload before output, a failed selection MUST return that held upstream
-/// response instead, without a reset attempt.
+/// been excluded for a pre-output overload or body error, a failed selection MUST return the
+/// retained fallback response instead, without a reset attempt.
 pub async fn infer(State(state): State<Arc<AppState>>, req: Request) -> Response {
     run(state, req, Surface::OpenAI).await
 }
@@ -459,8 +459,8 @@ async fn run(state: Arc<AppState>, req: Request, surface: Surface) -> Response {
     let mut reset_after_quota = false;
     let mut attempts = 0;
     let mut max_attempts = total_accounts;
-    // Accounts whose stream failed with a capacity code before output, skipped for this request.
-    let mut overloaded: std::collections::HashSet<String> = Default::default();
+    // Accounts whose streams failed during the pre-output hold, skipped for this request.
+    let mut excluded: std::collections::HashSet<String> = Default::default();
 
     while attempts < max_attempts {
         attempts += 1;
@@ -469,11 +469,11 @@ async fn run(state: Arc<AppState>, req: Request, surface: Surface) -> Response {
             sticky.as_deref(),
             &model,
             surface,
-            &overloaded,
+            &excluded,
         );
 
         if selection.is_err()
-            && !overloaded.is_empty()
+            && !excluded.is_empty()
             && let Some(replay) = last_upstream.take()
         {
             logging::log_request_completed(
@@ -497,7 +497,7 @@ async fn run(state: Arc<AppState>, req: Request, surface: Surface) -> Response {
                 sticky.as_deref(),
                 &model,
                 surface,
-                &overloaded,
+                &excluded,
             );
         }
 
@@ -574,8 +574,8 @@ async fn run(state: Arc<AppState>, req: Request, surface: Surface) -> Response {
                 );
                 return resp;
             }
-            Attempt::Overloaded { account_id, replay } => {
-                overloaded.insert(account_id);
+            Attempt::Excluded { account_id, replay } => {
+                excluded.insert(account_id);
                 last_upstream = Some(replay);
             }
             Attempt::Failover(passthrough) => {
@@ -616,12 +616,15 @@ async fn run(state: Arc<AppState>, req: Request, surface: Surface) -> Response {
     )
 }
 
-/// @cc [owner:ghuntley,label:proxy] failover-bounded-by-accounts
+/// @cc [owner:edwrdc,label:proxy] failover-bounded-by-accounts
 /// A request MUST make at most as many attempts as configured accounts, plus one additional attempt
 /// after a successful banked reset, and the first successful upstream response MUST be returned
 /// to the client; a 2xx stream that fails with a capacity code before any output is not successful:
 /// the account MUST be excluded for the rest of the request (without changing its health) and
-/// the next account tried. Upstream error bodies MUST be preserved and
+/// the next account tried. A 2xx stream whose body errors while the pre-output hold is undecided
+/// MUST fail over the same way, retaining a complete 502 `upstream_stream_error` as its fallback
+/// instead of the broken 2xx body. If every attempt fails, the last retained fallback MUST be
+/// returned. Upstream error bodies MUST be preserved and
 /// returned when every attempt fails (or a 503 `pool_exhausted` error when no upstream response
 /// was ever received). An upstream 401 or 403 MUST trigger exactly one forced token refresh and one
 /// same-account retry per request; a second 401 or 403 (or a failed refresh) MUST classify the
@@ -1041,9 +1044,33 @@ async fn attempt_account(
             replay
                 .headers_mut()
                 .insert(http::header::CONTENT_TYPE, content_type);
-            return Attempt::Overloaded {
+            return Attempt::Excluded {
                 account_id: selection.account_id.clone(),
                 replay,
+            };
+        }
+        // Retry before sending headers so a broken upstream body cannot abort the client response.
+        if matches!(finish.ended, Some(StreamEnd::UpstreamError)) && !finish.tap.decided() {
+            push_log(
+                state,
+                request_id,
+                model,
+                Some(selection.backend.as_str().to_string()),
+                Some(selection.account_id.clone()),
+                Some(account.label.clone()),
+                sticky.unwrap_or("none"),
+                StatusCode::BAD_GATEWAY.as_u16(),
+                started.elapsed().as_millis() as u64,
+            );
+            drop(finish);
+            drop(guard);
+            return Attempt::Excluded {
+                account_id: selection.account_id.clone(),
+                replay: error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream stream ended before any output",
+                    "upstream_stream_error",
+                ),
             };
         }
         let body_stream = Body::from_stream(futures::stream::unfold(

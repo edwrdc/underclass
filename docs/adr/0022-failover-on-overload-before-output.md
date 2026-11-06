@@ -4,6 +4,8 @@
 
 Accepted. Replaces the "failover only before the first upstream byte" rule, which ADR 0004 introduced and the `pre-first-byte-failover` contract in `CONTRACTS` carried. ADR 0004 is otherwise superseded by 0017. The contract is now `pre-output-failover`.
 
+Extended by ADR 0027 to retry body transport errors while the pre-output hold is undecided.
+
 ## Context
 
 Codex users still see "Selected model is at capacity. Please try a different model." The text is Codex's own rendering of an upstream overload error. Underclass does not generate it. Upstream answers `200`, sends `response.created`, usually waits 2-30 seconds, then sends a stream `error` event (`{"type":"error","error":{"code":"server_is_overloaded",...}}`) or `response.failed` with the same code. Under that rule a `200` counts as started, so the proxy passed the failure straight through.
