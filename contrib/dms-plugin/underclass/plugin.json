@@ -1,0 +1,13 @@
+{
+    "id": "underclass",
+    "name": "Underclass",
+    "description": "Pool health, quota headroom and request rate for the underclass LLM proxy",
+    "version": "0.1.0",
+    "author": "edwrdc",
+    "icon": "stacked_bar_chart",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./UnderclassWidget.qml",
+    "settings": "./UnderclassSettings.qml",
+    "permissions": ["settings_read", "settings_write"]
+}
