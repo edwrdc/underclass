@@ -29,6 +29,10 @@ a toggle or cost screen space, and a monitor is neither.
 
 - Changing `MonitorSnapshot`, `MonitorAccount` or the `observation` JSON can break the widget;
   `monitor.rs` and `top.rs` remain the reference consumers and the widget must follow them.
+- The widget reads `quota_view` (the normalized quota windows, ADR 0029) from each monitor
+  account: the headroom bar uses the least remaining account-wide window, the popout lists every
+  window including per-model ones, and banked Codex resets and staleness are shown. It falls back
+  to `quota`/`observation` against older servers.
 - The widget is not covered by `cargo test`; it is verified by loading it in DMS.
 - The admin token lives on the operator's desktop. A token file keeps it out of DMS settings and
   process arguments; the inline setting is a convenience with weaker protection.

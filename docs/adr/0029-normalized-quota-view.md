@@ -41,3 +41,6 @@ Fable were dropped because only a fixed set of keys was parsed.
   deliberately promoted to cooling.
 - The `quota` JSON shape is a new contract for the dashboard; the raw endpoint exposes upstream
   payloads to the admin token holder, so it must stay behind admin auth.
+- `GET /admin/api/monitor` exposes the same view per account as `quota_view` (built by the shared
+  `ui::quota_view` helper), next to the legacy `quota` and `observation` fields. The DMS widget and
+  `utop` render it; per-model (`limit:`) windows are shown but never drive severity colors.

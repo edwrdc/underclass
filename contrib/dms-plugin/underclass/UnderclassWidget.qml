@@ -38,6 +38,16 @@ PluginComponent {
     // Fraction of the tightest quota window left on an account (0..1), or null when unknown.
     function remaining(a) {
         let left = [];
+        // Prefer the normalized quota view. Per-model windows ("limit:" keys) are display-only.
+        const qv = a.quota_view;
+        if (qv && qv.windows && qv.windows.length > 0) {
+            for (const w of qv.windows)
+                if (typeof w.used === "number" && String(w.key).indexOf("limit:") !== 0)
+                    left.push(1 - w.used);
+            if (left.length > 0)
+                return Math.max(0, Math.min(1, Math.min.apply(null, left)));
+            left = [];
+        }
         const rl = a.quota && a.quota.rate_limit;
         if (rl) {
             for (const w of [rl.primary_window, rl.secondary_window])
@@ -316,6 +326,65 @@ exec curl -fsS --max-time 4 --unix-socket "$s" http://localhost/monitor'
                                         height: parent.height
                                         radius: 3
                                         color: root.quotaColor(frac)
+                                    }
+                                }
+
+                                // Every window of the quota view, including per-model ones.
+                                Repeater {
+                                    model: acct.quota_view && acct.quota_view.windows ? acct.quota_view.windows : []
+
+                                    Row {
+                                        id: windowRow
+                                        spacing: Theme.spacingS
+                                        readonly property real left: Math.max(0, Math.min(1, 1 - (typeof modelData.used === "number" ? modelData.used : 0)))
+                                        readonly property bool perModel: String(modelData.key).indexOf("limit:") === 0
+
+                                        StyledText {
+                                            width: 72
+                                            elide: Text.ElideRight
+                                            text: modelData.label
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: windowRow.perModel ? Theme.surfaceVariantText : Theme.surfaceText
+                                            opacity: windowRow.perModel ? 0.8 : 1
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Rectangle {
+                                            width: 80
+                                            height: 4
+                                            radius: 2
+                                            color: Theme.chipSurface
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Rectangle {
+                                                width: parent.width * windowRow.left
+                                                height: parent.height
+                                                radius: 2
+                                                color: root.quotaColor(windowRow.left)
+                                            }
+                                        }
+                                        StyledText {
+                                            text: Math.round(windowRow.left * 100) + "% left" + (modelData.resets_at_ms ? " · renews in " + root.countdown(modelData.resets_at_ms) : "")
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+                                }
+
+                                StyledText {
+                                    visible: text !== ""
+                                    width: parent.width
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    color: Theme.surfaceVariantText
+                                    text: {
+                                        const qv = acct.quota_view;
+                                        if (!qv)
+                                            return "";
+                                        let parts = [];
+                                        if (typeof qv.banked_resets === "number" && qv.banked_resets > 0)
+                                            parts.push(qv.banked_resets + (qv.banked_resets === 1 ? " reset banked" : " resets banked"));
+                                        if (qv.stale)
+                                            parts.push("(stale)");
+                                        return parts.join(" · ");
                                     }
                                 }
 

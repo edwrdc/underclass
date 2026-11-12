@@ -2,7 +2,7 @@
 //!
 //! The parsing functions are pure; the clock is passed in.
 use crate::resets::{ExtraLimit, RateLimit, UsageSnapshot, Window};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -20,7 +20,7 @@ pub fn disabled_poll_due(last_poll_ms: Option<i64>, now_ms: i64) -> bool {
 }
 
 /// One usage window.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct QuotaWindow {
     pub key: String,
     pub label: String,
@@ -31,13 +31,20 @@ pub struct QuotaWindow {
 }
 
 /// Every window of one account plus its banked resets.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct QuotaView {
     pub windows: Vec<QuotaWindow>,
     pub banked_resets: Option<i64>,
     pub credit_expirations: Vec<i64>,
     pub fetched_at_ms: i64,
     pub stale: bool,
+}
+
+impl QuotaWindow {
+    /// Per-model limits (`limit:` keys) are display-only; only the other windows gate an account.
+    pub fn is_account_wide(&self) -> bool {
+        !self.key.starts_with("limit:")
+    }
 }
 
 impl QuotaView {

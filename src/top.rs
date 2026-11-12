@@ -693,6 +693,26 @@ fn quota(account: &MonitorAccount, now_ms: i64) -> String {
 
 /// The Claude Code subscription windows, as the account's own usage API last reported them.
 fn claude_quota(account: &MonitorAccount) -> String {
+    if let Some(view) = account
+        .quota_view
+        .as_ref()
+        .filter(|v| !v.windows.is_empty())
+    {
+        return view
+            .windows
+            .iter()
+            .map(|w| {
+                // Per-model windows read "Fable 100%", dropping the shared "7d" length.
+                let label = if w.is_account_wide() {
+                    w.label.as_str()
+                } else {
+                    w.label.split_once(' ').map_or(w.label.as_str(), |(_, m)| m)
+                };
+                format!("{label} {:.0}%", (1.0 - w.used) * 100.0)
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+    }
     let Some(observation) = &account.observation else {
         return "waiting…".into();
     };
@@ -733,6 +753,26 @@ fn credits(account: &MonitorAccount) -> String {
 
 /// The Claude Code windows use the same severity bands as the Codex quota.
 fn claude_quota_color(account: &MonitorAccount) -> Color {
+    if let Some(view) = account
+        .quota_view
+        .as_ref()
+        .filter(|v| !v.windows.is_empty())
+    {
+        // Per-model windows are display-only and never drive severity.
+        let remaining = view
+            .windows
+            .iter()
+            .filter(|w| w.is_account_wide())
+            .map(|w| (1.0 - w.used) * 100.0)
+            .fold(100.0f64, f64::min);
+        return if remaining <= 10.0 {
+            RED
+        } else if remaining <= 30.0 {
+            YELLOW
+        } else {
+            GREEN
+        };
+    }
     let Some(observation) = &account.observation else {
         return MUTED;
     };
@@ -856,6 +896,7 @@ mod tests {
                 "reset_credits": 2,
             })),
             quota: None,
+            quota_view: None,
         };
         assert_eq!(quota(&account, 1_000), "5h 93% · 7d 58%");
         assert_eq!(credits(&account), "2");
@@ -872,6 +913,43 @@ mod tests {
     }
 
     #[test]
+    fn claude_quota_view_shows_model_windows_without_driving_severity() {
+        let window = |key: &str, label: &str, used: f64| crate::quota::QuotaWindow {
+            key: key.into(),
+            label: label.into(),
+            used,
+            resets_at_ms: None,
+            window_secs: None,
+        };
+        let account = MonitorAccount {
+            id: "c".into(),
+            label: "claude@example.test".into(),
+            backend: BackendId::Claude,
+            plan: None,
+            status: AccountStatus::Healthy,
+            reset_at: 0,
+            inflight: 0,
+            sticky_sessions: 0,
+            month: Counters::default(),
+            observation: None,
+            quota: None,
+            quota_view: Some(crate::quota::QuotaView {
+                windows: vec![
+                    window("five_hour", "5h", 0.08),
+                    window("seven_day", "7d", 0.07),
+                    window("limit:weekly:fable", "7d Fable", 1.0),
+                ],
+                banked_resets: None,
+                credit_expirations: vec![],
+                fetched_at_ms: 0,
+                stale: false,
+            }),
+        };
+        assert_eq!(quota(&account, 1_000), "5h 92% · 7d 93% · Fable 0%");
+        assert_eq!(quota_color(&account, 1_000), GREEN);
+    }
+
+    #[test]
     fn quota_palette_tracks_lowest_window_and_staleness() {
         let mut account = MonitorAccount {
             id: "a".into(),
@@ -884,6 +962,7 @@ mod tests {
             sticky_sessions: 0,
             month: Counters::default(),
             observation: None,
+            quota_view: None,
             quota: Some(UsageSnapshot {
                 additional_rate_limits: vec![],
                 rate_limit: Some(RateLimit {
@@ -942,6 +1021,7 @@ mod tests {
                         sticky_sessions: 0,
                         month: Counters::default(),
                         observation: None,
+                        quota_view: None,
                         quota: None,
                     }],
                     month: Counters::default(),

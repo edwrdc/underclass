@@ -29,6 +29,9 @@ pub struct MonitorAccount {
     /// quota snapshot (Claude Code windows, for example).
     #[serde(default)]
     pub observation: Option<serde_json::Value>,
+    /// Normalized quota windows, the same view as `quota` in `/admin/api/state`.
+    #[serde(default)]
+    pub quota_view: Option<crate::quota::QuotaView>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -143,6 +146,7 @@ fn collect(state: &AppState) -> rusqlite::Result<MonitorSnapshot> {
                         None
                     },
                     observation: state.observations.lock().unwrap().get(&account.id).cloned(),
+                    quota_view: crate::ui::quota_view(state, account, now),
                 }
             })
             .collect::<Vec<_>>()

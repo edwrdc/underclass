@@ -40,6 +40,28 @@ pub async fn require_ui_token(
     next.run(req).await
 }
 
+/// The normalized quota view of one account, shared by the admin state and the monitor.
+pub fn quota_view(
+    state: &AppState,
+    account: &crate::models::Account,
+    now: i64,
+) -> Option<crate::quota::QuotaView> {
+    match account.backend {
+        crate::models::BackendId::Codex => state
+            .resets
+            .snapshot(&account.id)
+            .map(|snapshot| crate::quota::from_codex(&snapshot, now)),
+        crate::models::BackendId::Claude => state
+            .claude_quotas
+            .lock()
+            .unwrap()
+            .get(&account.id)
+            .cloned()
+            .map(|view| view.at(now)),
+        _ => None,
+    }
+}
+
 fn account_view(state: &AppState, account: &crate::models::Account) -> serde_json::Value {
     let pool = state.pool.lock().unwrap();
     let inflight = pool
@@ -54,20 +76,7 @@ fn account_view(state: &AppState, account: &crate::models::Account) -> serde_jso
         .count();
     drop(pool);
     let now = now_ms();
-    let quota = match account.backend {
-        crate::models::BackendId::Codex => state
-            .resets
-            .snapshot(&account.id)
-            .map(|snapshot| crate::quota::from_codex(&snapshot, now)),
-        crate::models::BackendId::Claude => state
-            .claude_quotas
-            .lock()
-            .unwrap()
-            .get(&account.id)
-            .cloned()
-            .map(|view| view.at(now)),
-        _ => None,
-    };
+    let quota = quota_view(state, account, now);
     json!({
         "id": account.id,
         "backend": account.backend.as_str(),

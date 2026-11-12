@@ -10,7 +10,9 @@ snapshot `underclass top` renders, so the server needs no changes.
   unreachable.
 - **Popout**: attempts per minute over the last hour, month token totals, one card per account
   (status, plan, tightest quota window left, in-flight, sticky sessions, tokens this month) and the
-  last few failed requests.
+  last few failed requests. Quota comes from the monitor's `quota_view`: every window (including
+  per-model ones such as "7d Fable") with percent left and renewal countdown, banked Codex resets,
+  and a stale marker. Older servers without `quota_view` fall back to `quota`/`observation`.
 
 ## Install
 
