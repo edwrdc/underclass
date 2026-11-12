@@ -617,12 +617,24 @@ async fn poll_claude_usage(
                     snapshot.reset_credits = view.banked_resets;
                 }
             }
-            Err(e) => logging::log_account_state(
-                &account.id,
-                Some(&account.label),
-                "reset_credits_poll_failed",
-                &e.to_string(),
-            ),
+            Err(e) => {
+                let error = match &e {
+                    claude::AuthError::Status(code) => code.to_string(),
+                    other => other.to_string(),
+                };
+                state.claude_raw.record(
+                    &account.id,
+                    "oauth_rate_limit_reset_credits",
+                    serde_json::json!({ "error": error }),
+                    models::now_ms(),
+                );
+                logging::log_account_state(
+                    &account.id,
+                    Some(&account.label),
+                    "reset_credits_poll_failed",
+                    &e.to_string(),
+                );
+            }
         }
         state
             .observations

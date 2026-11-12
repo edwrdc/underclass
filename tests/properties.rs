@@ -1183,6 +1183,43 @@ fn test_claude_quota_windows_are_clamped_one_per_key_and_deterministic(tc: TestC
 }
 
 #[hegel::test]
+fn test_claude_scoped_limits_yield_one_bounded_window_each(tc: TestCase) {
+    let names: Vec<String> = tc.draw(
+        gs::vecs(gs::text().min_size(1).max_size(8).alphabet("abcdefgh"))
+            .max_size(8)
+            .unique(true),
+    );
+    let mut limits = vec![
+        serde_json::json!({"group": "session", "kind": "session", "percent": 5, "resets_at": null, "scope": null}),
+        serde_json::json!({"group": "weekly", "kind": "weekly_all", "percent": 6, "resets_at": null, "scope": null}),
+    ];
+    for name in &names {
+        let percent: i64 = tc.draw(gs::integers::<i64>().min_value(-500).max_value(500));
+        limits.push(serde_json::json!({
+            "group": "weekly", "kind": "weekly_scoped", "percent": percent,
+            "resets_at": "2026-11-18T13:00:00+00:00",
+            "scope": {"model": {"display_name": name, "id": null}, "surface": null}
+        }));
+    }
+    let body = serde_json::json!({
+        "five_hour": {"utilization": 1.0, "resets_at": null},
+        "seven_day": {"utilization": 2.0, "resets_at": null},
+        "limits": limits,
+    });
+    let view = underclass::quota::from_claude_usage(&body, 0);
+    assert_eq!(view.windows.len(), 2 + names.len());
+    for window in &view.windows {
+        assert!((0.0..=1.0).contains(&window.used));
+    }
+    let scoped = view
+        .windows
+        .iter()
+        .filter(|w| w.key.starts_with("limit:"))
+        .count();
+    assert_eq!(scoped, names.len());
+}
+
+#[hegel::test]
 fn test_codex_quota_used_is_always_a_fraction(tc: TestCase) {
     let used: f64 = tc.draw(gs::floats::<f64>().min_value(-500.0).max_value(500.0));
     let secs: i64 = tc.draw(gs::integers::<i64>().min_value(1).max_value(2_000_000));

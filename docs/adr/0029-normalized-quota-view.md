@@ -17,7 +17,12 @@ Fable were dropped because only a fixed set of keys was parsed.
   fraction, reset time, window length) plus a banked-reset count and credit expirations. The state
   API exposes it as `quota` on each account; Copilot has none.
 - Claude windows are parsed generically from any payload key carrying `utilization`, so new
-  model-scoped windows appear without code changes.
+  model-scoped windows appear without code changes. Real payloads also carry per-model weekly
+  limits (e.g. Fable) only in a `limits` array of `{group, kind, percent, resets_at, scope}`
+  entries; every entry other than `session` and `weekly_all` (which duplicate `five_hour` and
+  `seven_day`) becomes one window keyed `limit:<kind>:<scope>` and labelled like "7d Fable",
+  replacing a top-level window with the same label. The top-level `extra_usage` (spend credits) is
+  not a window.
 - Model-scoped windows are display-only. Only the account-wide 5h and 7d windows cool an account.
 - The Claude banked-reset count comes from `/api/oauth/rate-limit-reset-credits`.
 - Disabled accounts are polled slowly, for display only.

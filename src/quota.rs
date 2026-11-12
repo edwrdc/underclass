@@ -174,9 +174,54 @@ fn claude_group(key: &str) -> u8 {
         0
     } else if key.starts_with("seven_day") {
         1
-    } else {
+    } else if key.starts_with("limit:weekly") {
         2
+    } else {
+        3
     }
+}
+
+/// One scoped window from an entry of the `limits` array, or `None` for the session and
+/// all-models entries (which duplicate the top-level `five_hour` and `seven_day`).
+fn claude_limit_window(entry: &Value) -> Option<QuotaWindow> {
+    let kind = entry.get("kind")?.as_str()?;
+    if kind == "session" || kind == "weekly_all" {
+        return None;
+    }
+    let group = entry.get("group").and_then(Value::as_str).unwrap_or(kind);
+    let scope = entry.get("scope");
+    let text = |path: &[&str]| -> Option<String> {
+        let mut node = scope?;
+        for step in path {
+            node = node.get(*step)?;
+        }
+        node.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+    };
+    let name = text(&["model", "display_name"])
+        .or_else(|| text(&["model", "id"]))
+        .or_else(|| text(&["surface"]))
+        .unwrap_or_else(|| kind.to_string());
+    let label = match group {
+        "weekly" => format!("7d {name}"),
+        "session" => format!("5h {name}"),
+        other => format!("{other} {name}"),
+    };
+    let resets_at_ms = entry
+        .get("resets_at")
+        .and_then(Value::as_str)
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|v| v.timestamp_millis());
+    Some(QuotaWindow {
+        key: format!("limit:{kind}:{}", name.to_lowercase()),
+        label,
+        used: fraction(entry.get("percent")?.as_f64()?),
+        resets_at_ms,
+        window_secs: match group {
+            "weekly" => Some(7 * 86_400),
+            "session" => Some(5 * 3600),
+            _ => None,
+        },
+    })
 }
 
 /// The windows of an `/api/oauth/usage` payload: every top-level object with a numeric
@@ -185,8 +230,14 @@ pub fn claude_windows(body: &Value) -> Vec<QuotaWindow> {
     let Some(map) = body.as_object() else {
         return Vec::new();
     };
+    let scoped: Vec<QuotaWindow> = body
+        .get("limits")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(claude_limit_window).collect())
+        .unwrap_or_default();
     let mut windows: Vec<QuotaWindow> = map
         .iter()
+        .filter(|(key, _)| key.as_str() != "extra_usage" && key.as_str() != "limits")
         .filter_map(|(key, value)| {
             let used = value.get("utilization")?.as_f64()?;
             let resets_at_ms = value
@@ -206,7 +257,14 @@ pub fn claude_windows(body: &Value) -> Vec<QuotaWindow> {
                 },
             })
         })
+        .filter(|w| {
+            // A `limits` entry is preferred over a top-level key with the same label.
+            !scoped
+                .iter()
+                .any(|s| s.label.eq_ignore_ascii_case(&w.label))
+        })
         .collect();
+    windows.extend(scoped);
     windows.sort_by(|a, b| {
         claude_group(&a.key)
             .cmp(&claude_group(&b.key))
@@ -219,8 +277,13 @@ pub fn claude_windows(body: &Value) -> Vec<QuotaWindow> {
 /// `from_claude_usage` MUST turn every top-level key of the usage payload whose value is an
 /// object with a numeric `utilization` into exactly one window (percent converted to a 0..=1
 /// fraction), and MUST skip null or non-window keys. Ordering MUST be deterministic: five-hour
-/// windows, then seven-day windows, then the rest, each alphabetically by key. Banked resets
-/// are not in this payload and are left unset for the caller.
+/// windows, then seven-day windows, then scoped weekly windows, then the rest, each
+/// alphabetically by key. The top-level `extra_usage` (spend credits) is never a window. Per-model
+/// windows come from the `limits` array: every entry whose kind is not `session` or `weekly_all`
+/// (those duplicate `five_hour` and `seven_day`) MUST yield exactly one window, keyed
+/// `limit:<kind>:<scope>` and labelled like `7d Fable`, replacing any top-level window with the
+/// same label. Scoped windows are display-only and never affect cooling. Banked resets are not
+/// in this payload and are left unset for the caller.
 pub fn from_claude_usage(body: &Value, now_ms: i64) -> QuotaView {
     QuotaView {
         windows: claude_windows(body),
@@ -302,6 +365,34 @@ mod tests {
         assert_eq!(view.windows[0].used, 0.07);
         assert_eq!(view.windows[2].used, 1.0);
         assert_eq!(view.windows[0].resets_at_ms, Some(1_792_501_200_000));
+    }
+
+    #[test]
+    fn real_payload_fixture_yields_scoped_limit_windows() {
+        let body: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/claude_oauth_usage.json"))
+                .unwrap();
+        let view = from_claude_usage(&body, 1_000);
+        let labels: Vec<_> = view.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, ["5h", "7d", "7d Fable"]);
+        assert_eq!(view.windows[0].used, 0.0);
+        assert_eq!(view.windows[1].used, 0.25);
+        assert_eq!(view.windows[2].used, 0.48);
+        assert_eq!(view.windows[2].key, "limit:weekly_scoped:fable");
+        assert_eq!(view.windows[2].window_secs, Some(604_800));
+        assert!(view.windows[2].resets_at_ms.is_some());
+    }
+
+    #[test]
+    fn limits_entry_replaces_same_label_top_level_window() {
+        let body = json!({
+            "seven_day_fable": {"utilization": 10.0, "resets_at": null},
+            "limits": [{"group": "weekly", "kind": "weekly_scoped", "percent": 40,
+                "resets_at": null, "scope": {"model": {"display_name": "Fable", "id": null}, "surface": null}}]
+        });
+        let windows = claude_windows(&body);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used, 0.4);
     }
 
     #[test]
