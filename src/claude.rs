@@ -196,54 +196,42 @@ pub struct UsageWindow {
 #[derive(Clone, Debug, Default)]
 pub struct UsageSnapshot {
     pub plan: Option<String>,
-    pub five_hour: UsageWindow,
-    pub seven_day: UsageWindow,
-    pub seven_day_fable: UsageWindow,
+    /// Every window the payload reports (see `quota::claude_windows`).
+    pub windows: Vec<crate::quota::QuotaWindow>,
     /// Banked rate-limit reset credits the account can redeem.
     pub reset_credits: Option<i64>,
     pub observed_at_ms: i64,
 }
 
+/// Window keys that bound the whole account; model-scoped windows are display-only.
+const ACCOUNT_WIDE_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
+
 impl UsageSnapshot {
-    /// The earliest reset among the windows that are fully consumed.
+    /// The window with this payload key.
+    pub fn window(&self, key: &str) -> Option<&crate::quota::QuotaWindow> {
+        self.windows.iter().find(|w| w.key == key)
+    }
+
+    /// The earliest reset among the fully consumed account-wide windows. Model-scoped weekly
+    /// windows never cool the account.
     pub fn exhausted_reset_ms(&self) -> Option<i64> {
-        [&self.five_hour, &self.seven_day, &self.seven_day_fable]
-            .into_iter()
-            .filter_map(|window| {
-                let utilization = window.utilization?;
-                if utilization >= 1.0 {
-                    window.resets_at_ms
-                } else {
-                    None
-                }
-            })
+        self.windows
+            .iter()
+            .filter(|w| ACCOUNT_WIDE_WINDOWS.contains(&w.key.as_str()))
+            .filter(|w| w.used >= 1.0)
+            .filter_map(|w| w.resets_at_ms)
             .min()
     }
 }
 
 /// Parses the account usage payload.
 pub fn parse_usage(body: &Value, now_ms: i64) -> UsageSnapshot {
-    let window = |payload: Option<&Value>| UsageWindow {
-        // The usage API reports percent (`26.0`); everything downstream, like the unified
-        // rate-limit headers, works in fractions of the window.
-        utilization: payload
-            .and_then(|w| w.get("utilization"))
-            .and_then(Value::as_f64)
-            .map(|percent| percent / 100.0),
-        resets_at_ms: payload
-            .and_then(|w| w.get("resets_at"))
-            .and_then(Value::as_str)
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.timestamp_millis()),
-    };
     UsageSnapshot {
         plan: body
             .get("plan_type")
             .and_then(Value::as_str)
             .map(str::to_string),
-        five_hour: window(body.get("five_hour")),
-        seven_day: window(body.get("seven_day")),
-        seven_day_fable: window(body.get("seven_day_fable")),
+        windows: crate::quota::claude_windows(body),
         reset_credits: body
             .get("rate_limit_reset_credits")
             .and_then(|credits| credits.get("available_count"))
@@ -261,6 +249,18 @@ pub async fn fetch_usage(
     account: &Account,
     token: &str,
 ) -> Result<UsageSnapshot, AuthError> {
+    Ok(parse_usage(
+        &fetch_usage_raw(client, account, token).await?,
+        now_ms(),
+    ))
+}
+
+/// Fetches the raw `/api/oauth/usage` body.
+pub async fn fetch_usage_raw(
+    client: &Client,
+    account: &Account,
+    token: &str,
+) -> Result<Value, AuthError> {
     let mut request = client.get(format!("{}/api/oauth/usage", api_base()));
     request = request.header("authorization", format!("Bearer {token}"));
     if let Some(account_id) = account.account_id.as_deref() {
@@ -270,23 +270,24 @@ pub async fn fetch_usage(
     if !resp.status().is_success() {
         return Err(AuthError::Status(resp.status().as_u16()));
     }
-    let body: Value = resp.json().await?;
-    Ok(parse_usage(&body, now_ms()))
+    Ok(resp.json().await?)
 }
 
 /// The account usage as the admin UI shows it.
 pub fn usage_view(snapshot: &UsageSnapshot) -> Value {
-    let window = |window: &UsageWindow| {
+    let window = |key: &str| {
+        let found = snapshot.window(key);
         serde_json::json!({
-            "utilization": window.utilization,
-            "resets_at_ms": window.resets_at_ms,
+            "utilization": found.map(|w| w.used),
+            "resets_at_ms": found.and_then(|w| w.resets_at_ms),
         })
     };
     serde_json::json!({
         "plan": snapshot.plan,
-        "five_hour": window(&snapshot.five_hour),
-        "seven_day": window(&snapshot.seven_day),
-        "seven_day_fable": window(&snapshot.seven_day_fable),
+        "five_hour": window("five_hour"),
+        "seven_day": window("seven_day"),
+        "seven_day_fable": window("seven_day_fable"),
+        "windows": snapshot.windows,
         "reset_credits": snapshot.reset_credits,
         "observed_at_ms": snapshot.observed_at_ms,
     })
@@ -306,9 +307,15 @@ pub struct ResetCredit {
 
 impl ResetCredit {
     /// Whether the credit can still be redeemed.
+    ///
+    /// The reset type is matched loosely (absent, or any `rate_limit` type) so a renamed type
+    /// does not hide a usable credit.
     pub fn available(&self) -> bool {
-        self.reset_type.as_deref() == Some("claude_rate_limits")
-            && self.status.as_deref() == Some("available")
+        self.status.as_deref() == Some("available")
+            && self
+                .reset_type
+                .as_deref()
+                .is_none_or(|t| t.contains("rate_limit"))
     }
 
     /// When the credit expires, in epoch milliseconds.
@@ -332,6 +339,22 @@ pub async fn fetch_reset_credits(
     account: &Account,
     token: &str,
 ) -> Result<Vec<ResetCredit>, AuthError> {
+    credits_from_raw(&fetch_reset_credits_raw(client, account, token).await?)
+}
+
+/// Parses the credit list of a raw reset-credits body.
+pub fn credits_from_raw(raw: &Value) -> Result<Vec<ResetCredit>, AuthError> {
+    let payload: ResetCreditsPayload = serde_json::from_value(raw.clone())
+        .map_err(|e| AuthError::Failed(format!("invalid reset credits: {e}")))?;
+    Ok(payload.credits)
+}
+
+/// Fetches the raw `/api/oauth/rate-limit-reset-credits` body.
+pub async fn fetch_reset_credits_raw(
+    client: &Client,
+    account: &Account,
+    token: &str,
+) -> Result<Value, AuthError> {
     let mut request = client.get(format!("{}/api/oauth/rate-limit-reset-credits", api_base()));
     request = request.header("authorization", format!("Bearer {token}"));
     if let Some(account_id) = account.account_id.as_deref() {
@@ -341,8 +364,7 @@ pub async fn fetch_reset_credits(
     if !resp.status().is_success() {
         return Err(AuthError::Status(resp.status().as_u16()));
     }
-    let payload: ResetCreditsPayload = resp.json().await?;
-    Ok(payload.credits)
+    Ok(resp.json().await?)
 }
 
 /// Redeems one banked reset credit.
@@ -1365,9 +1387,19 @@ mod tests {
         });
         let snapshot = parse_usage(&body, 1_000);
         assert_eq!(snapshot.plan.as_deref(), Some("max"));
-        assert_eq!(snapshot.five_hour.utilization, Some(0.07));
+        assert_eq!(snapshot.window("five_hour").map(|w| w.used), Some(0.07));
         assert_eq!(snapshot.reset_credits, Some(2));
-        assert!(snapshot.exhausted_reset_ms().is_some());
+        // The model-scoped weekly window is spent, but only account-wide windows cool.
+        assert_eq!(snapshot.exhausted_reset_ms(), None);
+        assert_eq!(
+            usage_view(&snapshot)["windows"].as_array().unwrap().len(),
+            3
+        );
+        let spent = parse_usage(
+            &json!({"five_hour": {"utilization": 100.0, "resets_at": "2026-10-20T13:00:00Z"}}),
+            1_000,
+        );
+        assert_eq!(spent.exhausted_reset_ms(), Some(1_792_501_200_000));
     }
 
     #[test]
@@ -1378,7 +1410,7 @@ mod tests {
             "seven_day": {"utilization": 26.0, "resets_at": "2026-10-23T03:59:59Z"},
         });
         let snapshot = parse_usage(&body, 1_000);
-        assert_eq!(snapshot.seven_day.utilization, Some(0.26));
+        assert_eq!(snapshot.window("seven_day").map(|w| w.used), Some(0.26));
         assert_eq!(snapshot.exhausted_reset_ms(), None);
     }
 
@@ -1407,6 +1439,18 @@ mod tests {
         };
         assert!(!spent.available());
         assert_eq!(spent.expires_at_ms(), None);
+        let untyped = ResetCredit {
+            id: "credit-3".into(),
+            reset_type: None,
+            status: Some("available".into()),
+            expires_at: None,
+        };
+        assert!(untyped.available());
+        let other = ResetCredit {
+            reset_type: Some("something_else".into()),
+            ..untyped
+        };
+        assert!(!other.available());
     }
 
     #[test]

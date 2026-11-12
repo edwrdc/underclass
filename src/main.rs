@@ -1,7 +1,7 @@
 use underclass::provider::BackendMap;
 use underclass::{
-    claude, cli, codex, config, copilot, flows, logging, models, monitor, pool, proxy, stats_api,
-    store, tokens, top, ui,
+    claude, cli, codex, config, copilot, flows, logging, models, monitor, pool, proxy, quota,
+    stats_api, store, tokens, top, ui,
 };
 
 use clap::{Parser, Subcommand};
@@ -220,6 +220,8 @@ async fn async_serve(bind_override: Option<String>) -> Result<(), Box<dyn std::e
         )),
         stream_usage_unsupported: Mutex::new(Default::default()),
         observations: Mutex::new(Default::default()),
+        claude_quotas: Mutex::new(Default::default()),
+        claude_raw: Default::default(),
         stats_retention_days: cfg.stats_retention_days,
     });
 
@@ -270,8 +272,9 @@ async fn async_serve(bind_override: Option<String>) -> Result<(), Box<dyn std::e
     {
         let state = state.clone();
         tokio::spawn(async move {
+            let mut disabled_polls: std::collections::HashMap<String, i64> = Default::default();
             loop {
-                poll_claude_usage(&state).await;
+                poll_claude_usage(&state, &mut disabled_polls).await;
                 tokio::time::sleep(CLAUDE_USAGE_POLL).await;
             }
         });
@@ -381,6 +384,10 @@ async fn async_serve(bind_override: Option<String>) -> Result<(), Box<dyn std::e
         .route(
             "/admin/api/accounts/{id}/reset",
             axum::routing::post(ui::reset_account),
+        )
+        .route(
+            "/admin/api/accounts/{id}/usage/raw",
+            axum::routing::get(ui::raw_usage),
         )
         .route(
             "/admin/api/catalog/{backend}",
@@ -539,15 +546,28 @@ async fn refresh_claude_catalogs_on_boot(state: &Arc<proxy::AppState>) {
 ///
 /// The account usage API is a first-party endpoint, so this never sends anything that looks like
 /// a Claude Code request.
-async fn poll_claude_usage(state: &Arc<proxy::AppState>) {
+///
+/// Disabled accounts are polled only every `quota::DISABLED_POLL_MS`, for display; their status
+/// is never changed.
+async fn poll_claude_usage(
+    state: &Arc<proxy::AppState>,
+    disabled_polls: &mut std::collections::HashMap<String, i64>,
+) {
     let accounts: Vec<models::Account> = state
         .store
         .list_accounts()
         .into_iter()
         .filter(|a| a.backend == models::BackendId::Claude)
-        .filter(|a| a.status != models::AccountStatus::Disabled)
         .collect();
     for account in accounts {
+        let disabled = account.status == models::AccountStatus::Disabled;
+        if disabled {
+            let now = models::now_ms();
+            if !quota::disabled_poll_due(disabled_polls.get(&account.id).copied(), now) {
+                continue;
+            }
+            disabled_polls.insert(account.id.clone(), now);
+        }
         let token = match state.tokens.access_token(&account).await {
             Ok(token) => token,
             Err(e) => {
@@ -560,8 +580,8 @@ async fn poll_claude_usage(state: &Arc<proxy::AppState>) {
                 continue;
             }
         };
-        let snapshot = match claude::fetch_usage(&state.client, &account, &token).await {
-            Ok(snapshot) => snapshot,
+        let raw = match claude::fetch_usage_raw(&state.client, &account, &token).await {
+            Ok(raw) => raw,
             Err(e) => {
                 logging::log_account_state(
                     &account.id,
@@ -572,11 +592,51 @@ async fn poll_claude_usage(state: &Arc<proxy::AppState>) {
                 continue;
             }
         };
+        let fetched_at = models::now_ms();
+        state
+            .claude_raw
+            .record(&account.id, "oauth_usage", raw.clone(), fetched_at);
+        let mut snapshot = claude::parse_usage(&raw, fetched_at);
+        let mut view = quota::from_claude_usage(&raw, fetched_at);
+        view.banked_resets = snapshot.reset_credits;
+        // The credits endpoint is the authoritative source for banked resets.
+        match claude::fetch_reset_credits_raw(&state.client, &account, &token).await {
+            Ok(credits_raw) => {
+                state.claude_raw.record(
+                    &account.id,
+                    "oauth_rate_limit_reset_credits",
+                    credits_raw.clone(),
+                    models::now_ms(),
+                );
+                if let Ok(credits) = claude::credits_from_raw(&credits_raw) {
+                    let available: Vec<&claude::ResetCredit> =
+                        credits.iter().filter(|c| c.available()).collect();
+                    view.banked_resets = Some(available.len() as i64);
+                    view.credit_expirations =
+                        available.iter().filter_map(|c| c.expires_at_ms()).collect();
+                    snapshot.reset_credits = view.banked_resets;
+                }
+            }
+            Err(e) => logging::log_account_state(
+                &account.id,
+                Some(&account.label),
+                "reset_credits_poll_failed",
+                &e.to_string(),
+            ),
+        }
         state
             .observations
             .lock()
             .unwrap()
             .insert(account.id.clone(), claude::usage_view(&snapshot));
+        state
+            .claude_quotas
+            .lock()
+            .unwrap()
+            .insert(account.id.clone(), view);
+        if disabled {
+            continue;
+        }
         if let Some(plan) = snapshot.plan.clone()
             && account.plan.as_deref() != Some(plan.as_str())
         {

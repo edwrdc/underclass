@@ -1114,3 +1114,96 @@ fn test_model_cooldown_scopes_one_model(tc: TestCase) {
         "the cooldown expires on its own"
     );
 }
+
+/// A Claude usage payload from drawn keys, utilizations (including out-of-range ones), and
+/// non-window values.
+fn draw_claude_payload(tc: &TestCase) -> (serde_json::Value, usize) {
+    let keys: Vec<String> = tc.draw(
+        gs::vecs(
+            gs::text()
+                .min_size(1)
+                .max_size(12)
+                .alphabet("abcdefghij_0123456789"),
+        )
+        .max_size(12)
+        .unique(true),
+    );
+    let mut map = serde_json::Map::new();
+    let mut windows = 0;
+    for (i, key) in keys.iter().enumerate() {
+        match i % 3 {
+            0 => {
+                let utilization: f64 =
+                    tc.draw(gs::floats::<f64>().min_value(-1_000.0).max_value(1_000.0));
+                map.insert(
+                    key.clone(),
+                    serde_json::json!({"utilization": utilization, "resets_at": "2026-10-20T13:00:00Z"}),
+                );
+                windows += 1;
+            }
+            1 => {
+                map.insert(key.clone(), serde_json::Value::Null);
+            }
+            _ => {
+                map.insert(
+                    key.clone(),
+                    serde_json::json!({"utilization": null, "resets_at": null}),
+                );
+            }
+        }
+    }
+    (serde_json::Value::Object(map), windows)
+}
+
+#[hegel::test]
+fn test_claude_quota_windows_are_clamped_one_per_key_and_deterministic(tc: TestCase) {
+    let (body, expected) = draw_claude_payload(&tc);
+    let view = underclass::quota::from_claude_usage(&body, 0);
+    assert_eq!(view.windows.len(), expected);
+    for window in &view.windows {
+        assert!((0.0..=1.0).contains(&window.used));
+    }
+    let mut keys: Vec<&str> = view.windows.iter().map(|w| w.key.as_str()).collect();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), expected);
+    assert_eq!(view, underclass::quota::from_claude_usage(&body, 0));
+    // Five-hour-ish windows never follow seven-day-ish ones, which never follow the rest.
+    let group = |k: &str| {
+        if k.starts_with("five_hour") {
+            0
+        } else if k.starts_with("seven_day") {
+            1
+        } else {
+            2
+        }
+    };
+    let groups: Vec<u8> = view.windows.iter().map(|w| group(&w.key)).collect();
+    assert!(groups.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[hegel::test]
+fn test_codex_quota_used_is_always_a_fraction(tc: TestCase) {
+    let used: f64 = tc.draw(gs::floats::<f64>().min_value(-500.0).max_value(500.0));
+    let secs: i64 = tc.draw(gs::integers::<i64>().min_value(1).max_value(2_000_000));
+    let window = Window {
+        used_percent: used,
+        reset_at: Some(1),
+        limit_window_seconds: Some(secs),
+    };
+    let snapshot = underclass::resets::UsageSnapshot {
+        rate_limit: Some(RateLimit {
+            allowed: Some(true),
+            limit_reached: None,
+            primary_window: Some(window.clone()),
+            secondary_window: Some(window),
+        }),
+        additional_rate_limits: vec![],
+        available_resets: 0,
+        credit_expirations: vec![],
+        fetched_at_ms: 0,
+    };
+    let view = underclass::quota::from_codex(&snapshot, 0);
+    assert_eq!(view.windows.len(), 2);
+    assert!(view.windows.iter().all(|w| (0.0..=1.0).contains(&w.used)));
+}

@@ -14,23 +14,38 @@ const CHECK_INTERVAL_MS: i64 = 30_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Window {
+    #[serde(default)]
     pub used_percent: f64,
     pub reset_at: Option<i64>,
     pub limit_window_seconds: Option<i64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RateLimit {
+    #[serde(default)]
     pub allowed: Option<bool>,
+    #[serde(default)]
     pub limit_reached: Option<bool>,
+    #[serde(default)]
     pub primary_window: Option<Window>,
+    #[serde(default)]
     pub secondary_window: Option<Window>,
+}
+
+/// An extra limit bucket from `/wham/usage` (for example a per-model limit).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExtraLimit {
+    pub name: String,
+    pub rate_limit: RateLimit,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct UsageResponse {
+    #[serde(default)]
     account_id: Option<String>,
+    #[serde(default)]
     rate_limit: Option<RateLimit>,
+    #[serde(default)]
     rate_limit_reset_credits: Option<CreditCount>,
 }
 
@@ -133,6 +148,8 @@ impl ManualResetError {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UsageSnapshot {
     pub rate_limit: Option<RateLimit>,
+    #[serde(default)]
+    pub additional_rate_limits: Vec<ExtraLimit>,
     pub available_resets: i64,
     pub credit_expirations: Vec<Option<i64>>,
     pub fetched_at_ms: i64,
@@ -252,6 +269,8 @@ pub struct ResetManager {
     base_url: String,
     enabled: bool,
     snapshots: Mutex<HashMap<String, UsageSnapshot>>,
+    /// The last raw upstream bodies per account, for diagnostics.
+    pub raw: crate::quota::RawPayloads,
     last_check_ms: Mutex<i64>,
     lock: AsyncMutex<()>,
 }
@@ -263,6 +282,7 @@ impl ResetManager {
             base_url: base_url.trim_end_matches('/').to_string(),
             enabled,
             snapshots: Mutex::new(HashMap::new()),
+            raw: Default::default(),
             last_check_ms: Mutex::new(0),
             lock: AsyncMutex::new(()),
         }
@@ -331,7 +351,14 @@ impl ResetManager {
         if !response.status().is_success() {
             return Err("upstream_error");
         }
-        let usage: UsageResponse = response.json().await.map_err(|_| "invalid_usage")?;
+        let raw: serde_json::Value = response.json().await.map_err(|_| "invalid_usage")?;
+        self.raw
+            .record(&account.id, "wham_usage", raw.clone(), now_ms());
+        let additional_rate_limits = raw
+            .get("additional_rate_limits")
+            .map(crate::quota::parse_additional_limits)
+            .unwrap_or_default();
+        let usage: UsageResponse = serde_json::from_value(raw).map_err(|_| "invalid_usage")?;
         if usage
             .account_id
             .as_ref()
@@ -346,6 +373,7 @@ impl ResetManager {
             .map_or(0, |c| c.available_count.max(0));
         let snapshot = UsageSnapshot {
             rate_limit: usage.rate_limit,
+            additional_rate_limits,
             available_resets,
             credit_expirations: if available_resets > 0 {
                 self.snapshot(&account.id)
@@ -384,7 +412,14 @@ impl ResetManager {
         if !response.status().is_success() {
             return Err("upstream_error");
         }
-        let details: CreditList = response.json().await.map_err(|_| "invalid_credits")?;
+        let raw: serde_json::Value = response.json().await.map_err(|_| "invalid_credits")?;
+        self.raw.record(
+            &account.id,
+            "wham_rate_limit_reset_credits",
+            raw.clone(),
+            now_ms(),
+        );
+        let details: CreditList = serde_json::from_value(raw).map_err(|_| "invalid_credits")?;
         let credits: Vec<Credit> = details
             .credits
             .into_iter()

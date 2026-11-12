@@ -885,6 +885,7 @@ mod tests {
             month: Counters::default(),
             observation: None,
             quota: Some(UsageSnapshot {
+                additional_rate_limits: vec![],
                 rate_limit: Some(RateLimit {
                     allowed: Some(true),
                     limit_reached: Some(false),

@@ -459,6 +459,8 @@ async fn spawn_app(
         )),
         stream_usage_unsupported: Mutex::new(Default::default()),
         observations: Mutex::new(Default::default()),
+        claude_quotas: Mutex::new(Default::default()),
+        claude_raw: Default::default(),
         stats_retention_days: 730,
     });
 

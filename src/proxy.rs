@@ -65,6 +65,10 @@ pub struct AppState {
     /// Per-account observations a backend reported about its last upstream response, keyed by
     /// account id. Backends decide what to report; the proxy only stores it.
     pub observations: Mutex<std::collections::HashMap<String, Value>>,
+    /// The unified quota view of each Claude account, keyed by account id.
+    pub claude_quotas: Mutex<std::collections::HashMap<String, crate::quota::QuotaView>>,
+    /// The last raw Claude usage payloads per account, for diagnostics.
+    pub claude_raw: crate::quota::RawPayloads,
     /// How long usage rows, upstream events, and daily rollups are kept.
     pub stats_retention_days: i64,
 }

@@ -53,6 +53,21 @@ fn account_view(state: &AppState, account: &crate::models::Account) -> serde_jso
         .filter(|b| b.account_id == account.id)
         .count();
     drop(pool);
+    let now = now_ms();
+    let quota = match account.backend {
+        crate::models::BackendId::Codex => state
+            .resets
+            .snapshot(&account.id)
+            .map(|snapshot| crate::quota::from_codex(&snapshot, now)),
+        crate::models::BackendId::Claude => state
+            .claude_quotas
+            .lock()
+            .unwrap()
+            .get(&account.id)
+            .cloned()
+            .map(|view| view.at(now)),
+        _ => None,
+    };
     json!({
         "id": account.id,
         "backend": account.backend.as_str(),
@@ -67,6 +82,7 @@ fn account_view(state: &AppState, account: &crate::models::Account) -> serde_jso
         "enterprise_url": account.enterprise_url,
         "created_at": account.created_at,
         "usage": state.resets.snapshot(&account.id),
+        "quota": quota,
         "observation": state.observations.lock().unwrap().get(&account.id).cloned(),
     })
 }
@@ -595,4 +611,27 @@ pub async fn refresh_copilot_catalog(State(state): State<Arc<AppState>>) -> Resp
         }
     }
     Json(json!({ "refreshed_accounts": refreshed, "errors": errors })).into_response()
+}
+
+/// @cc [owner:edwrdc,label:pool] raw-usage-diagnostics
+/// `raw_usage` MUST return the last raw upstream usage and reset-credit JSON bodies kept for the
+/// account, each with its fetch time, and MUST NOT include request or response headers or any
+/// credential. It MUST return 404 for an unknown account.
+pub async fn raw_usage(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Some(account) = state.store.get_account(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown_account", "message": "unknown account" })),
+        )
+            .into_response();
+    };
+    let mut payloads = state.resets.raw.get(&id);
+    payloads.extend(state.claude_raw.get(&id));
+    Json(json!({
+        "account_id": account.id,
+        "label": account.label,
+        "backend": account.backend.as_str(),
+        "payloads": payloads,
+    }))
+    .into_response()
 }

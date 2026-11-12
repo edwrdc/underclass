@@ -42,12 +42,16 @@
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
   .k-overloaded { background: #f85149; } .k-policy_blocked { background: #a371f7; } .k-quota_exhausted { background: #d29922; }
   .k-retries_exhausted { background: #db6d28; } .k-upstream_failed { background: #8b949e; } .k-quota_cooling { background: #e3b341; }
+  .qw { white-space: nowrap; font-size: 0.78rem; line-height: 1.5; }
+  .qbar { display: inline-block; width: 48px; height: 6px; background: #21262d; border-radius: 3px; vertical-align: 1px; overflow: hidden; margin: 0 6px; }
+  .qbar > i { display: block; height: 100%; }
+  .q-ok { background: #3fb950; } .q-warn { background: #d29922; } .q-low { background: #f85149; }
   .k-pool_saturated { background: #58a6ff; }
 </style>
 </head>
 <body>
 <main>
-  <h1>underclass <small>pooled codex + copilot subscriptions</small></h1>
+  <h1>underclass <small>pooled codex + claude + copilot subscriptions</small></h1>
 
   <section class="card">
     <div class="row" style="justify-content: space-between">
@@ -58,10 +62,10 @@
       </div>
     </div>
     <table id="accounts">
-      <thead><tr><th>label</th><th>backend</th><th>plan</th><th>status</th><th>in-flight</th><th>sticky sessions</th><th>renews in</th><th>quota</th><th>Codex usage</th><th>banked resets</th><th></th></tr></thead>
+      <thead><tr><th>label</th><th>backend</th><th>plan</th><th>status</th><th>in-flight</th><th>sticky sessions</th><th>renews in</th><th>quota left</th><th>banked resets</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
-    <p class="muted">Healthy accounts serve requests. Quota exhaustion moves an account to <b>cooling</b> until its window resets — it stays configured. <b>auth error</b> accounts need re-login.</p>
+    <p class="muted"><b>quota left</b> = percent of each subscription window remaining (5h, weekly, and per-model weekly limits such as Fable); <b>banked resets</b> can be redeemed to restore an exhausted window. Healthy accounts serve requests. Exhausting a window moves an account to <b>cooling</b> until it renews; <b>auth error</b> accounts need re-login.</p>
   </section>
 
   <section class="card">
@@ -257,15 +261,13 @@ async function loadState() {
         <td><span class="badge ${a.status}">${a.status}</span></td>
         <td>${a.inflight}</td><td>${a.sticky_sessions}</td>
         <td>${fmtReset(a.cooling_remaining_ms, a)}</td>
-        <td>${formatQuota(a.observation)}</td>
-        <td>${formatUsage(a.usage)}</td>
-        <td>${formatCredits(a.usage)}</td>
+        <td>${a.quota ? formatQuotaLeft(a.quota) : formatQuota(a.observation) + (a.usage ? '<br>' + formatUsage(a.usage) : '')}</td>
+        <td>${a.quota ? formatBanked(a.quota) : formatCredits(a.usage)}</td>
         <td class="row">
           ${a.status === 'disabled' ? `<button onclick="acct('${a.id}','enable')">Enable</button>` : `<button onclick="acct('${a.id}','disable')">Disable</button>`}
           ${a.status === 'auth_error' ? `<button onclick="acct('${a.id}','enable')">Enable</button><button class="primary" onclick="relogin('${a.id}')">Re-login</button>` : ''}
           ${a.backend !== 'copilot' ? `<button onclick="refreshToken('${a.id}')">Refresh token</button>` : ''}
-          ${a.backend === 'codex' && a.usage && a.usage.available_resets > 0 ? `<button onclick="useReset('${a.id}')">Use reset</button>` : ''}
-          ${a.backend === 'claude' && a.observation && a.observation.reset_credits > 0 ? `<button onclick="useReset('${a.id}')">Use reset</button>` : ''}
+          ${canUseReset(a) ? `<button onclick="useReset('${a.id}')">Use reset</button>` : ''}
           <button class="danger" onclick="del('${a.id}')">Remove</button>
         </td>`;
       tbody.appendChild(tr);
@@ -419,6 +421,45 @@ async function loadStats() {
     tr.innerHTML = statsCells(name, totals);
     body.appendChild(tr);
   }
+}
+
+function canUseReset(a) {
+  if (a.backend !== 'codex' && a.backend !== 'claude') return false;
+  if (a.quota) return a.quota.banked_resets > 0;
+  if (a.backend === 'codex') return !!(a.usage && a.usage.available_resets > 0);
+  return !!(a.observation && a.observation.reset_credits > 0);
+}
+
+function fmtRelative(ms) {
+  const m = Math.max(0, Math.floor(ms / 60000));
+  const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + (m % 60) + 'm';
+  return m + 'm';
+}
+
+function formatQuotaLeft(q) {
+  const windows = q.windows || [];
+  const lines = windows.map(w => {
+    const left = Math.max(0, Math.min(100, Math.round(100 - (Number(w.used) || 0) * 100)));
+    const cls = left > 30 ? 'q-ok' : left > 10 ? 'q-warn' : 'q-low';
+    let renew = '';
+    if (w.resets_at_ms) {
+      const abs = new Date(w.resets_at_ms).toLocaleString();
+      renew = ` <span class="muted" title="${esc(abs)}">renews in ${esc(fmtRelative(w.resets_at_ms - Date.now()))}</span>`;
+    }
+    return `<div class="qw">${esc(w.label)}<span class="qbar"><i class="${cls}" style="width:${left}%"></i></span>${left}% left${renew}</div>`;
+  }).join('');
+  const checked = q.fetched_at_ms
+    ? `<div class="muted qw">checked ${esc(new Date(q.fetched_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}${q.stale ? ' (stale)' : ''}</div>`
+    : '';
+  return (lines || '<span class="muted">no windows</span>') + checked;
+}
+
+function formatBanked(q) {
+  if (!q.banked_resets) return '—';
+  const exp = (q.credit_expirations || []).filter(Boolean).sort((a, b) => a - b);
+  return `${esc(q.banked_resets)}${exp.length ? '<br><span class="muted">next expires ' + esc(new Date(exp[0]).toLocaleDateString()) + '</span>' : ''}`;
 }
 
 function formatUsage(usage) {
