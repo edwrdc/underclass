@@ -541,8 +541,7 @@ async fn refresh_claude_catalogs_on_boot(state: &Arc<proxy::AppState>) {
     }
 }
 
-/// Polls each Claude account's own usage API for its plan, quota windows, and banked reset
-/// credits, and cools an account whose window is spent.
+/// Polls each Claude account's own usage API for its plan, quota windows, and cools an account whose window is spent.
 ///
 /// The account usage API is a first-party endpoint, so this never sends anything that looks like
 /// a Claude Code request.
@@ -596,46 +595,8 @@ async fn poll_claude_usage(
         state
             .claude_raw
             .record(&account.id, "oauth_usage", raw.clone(), fetched_at);
-        let mut snapshot = claude::parse_usage(&raw, fetched_at);
-        let mut view = quota::from_claude_usage(&raw, fetched_at);
-        view.banked_resets = snapshot.reset_credits;
-        // The credits endpoint is the authoritative source for banked resets.
-        match claude::fetch_reset_credits_raw(&state.client, &account, &token).await {
-            Ok(credits_raw) => {
-                state.claude_raw.record(
-                    &account.id,
-                    "oauth_rate_limit_reset_credits",
-                    credits_raw.clone(),
-                    models::now_ms(),
-                );
-                if let Ok(credits) = claude::credits_from_raw(&credits_raw) {
-                    let available: Vec<&claude::ResetCredit> =
-                        credits.iter().filter(|c| c.available()).collect();
-                    view.banked_resets = Some(available.len() as i64);
-                    view.credit_expirations =
-                        available.iter().filter_map(|c| c.expires_at_ms()).collect();
-                    snapshot.reset_credits = view.banked_resets;
-                }
-            }
-            Err(e) => {
-                let error = match &e {
-                    claude::AuthError::Status(code) => code.to_string(),
-                    other => other.to_string(),
-                };
-                state.claude_raw.record(
-                    &account.id,
-                    "oauth_rate_limit_reset_credits",
-                    serde_json::json!({ "error": error }),
-                    models::now_ms(),
-                );
-                logging::log_account_state(
-                    &account.id,
-                    Some(&account.label),
-                    "reset_credits_poll_failed",
-                    &e.to_string(),
-                );
-            }
-        }
+        let snapshot = claude::parse_usage(&raw, fetched_at);
+        let view = quota::from_claude_usage(&raw, fetched_at);
         state
             .observations
             .lock()

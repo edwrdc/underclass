@@ -8,7 +8,7 @@ Accepted
 
 The admin dashboard showed Claude utilization as percent used in one column and Codex usage as
 percent left in another, so the same question ("how much is left?") had two answers in two units.
-Claude banked resets were read only from the usage payload, and per-model weekly windows such as
+Per-model weekly windows such as
 Fable were dropped because only a fixed set of keys was parsed.
 
 ## Decision
@@ -24,7 +24,11 @@ Fable were dropped because only a fixed set of keys was parsed.
   replacing a top-level window with the same label. The top-level `extra_usage` (spend credits) is
   not a window.
 - Model-scoped windows are display-only. Only the account-wide 5h and 7d windows cool an account.
-- The Claude banked-reset count comes from `/api/oauth/rate-limit-reset-credits`.
+- Claude banked resets are not available via OAuth: `/api/oauth/rate-limit-reset-credits` (and
+  `/consume`) return 404 upstream for every account, and `/api/oauth/usage` carries no reset-credit
+  field. They are visible only on claude.ai, so the dashboard shows "—" with an explanatory tooltip
+  for Claude accounts, never polls that endpoint, and Claude reset redemption is removed.
+  `POST /admin/api/accounts/:id/reset` for a Claude account returns 422 `unsupported`.
 - Disabled accounts are polled slowly, for display only.
 - `GET /admin/api/accounts/:id/usage/raw` returns the raw upstream payload for diagnosis.
 - The dashboard shows two columns, "quota left" (percent remaining per window, with renewal time)

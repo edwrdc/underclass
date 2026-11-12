@@ -262,7 +262,7 @@ async function loadState() {
         <td>${a.inflight}</td><td>${a.sticky_sessions}</td>
         <td>${fmtReset(a.cooling_remaining_ms, a)}</td>
         <td>${a.quota ? formatQuotaLeft(a.quota) : formatQuota(a.observation) + (a.usage ? '<br>' + formatUsage(a.usage) : '')}</td>
-        <td>${a.quota ? formatBanked(a.quota) : formatCredits(a.usage)}</td>
+        <td>${a.backend === 'claude' ? '<span title="Claude banked resets are only visible on claude.ai">—</span>' : a.quota ? formatBanked(a.quota) : formatCredits(a.usage)}</td>
         <td class="row">
           ${a.status === 'disabled' ? `<button onclick="acct('${a.id}','enable')">Enable</button>` : `<button onclick="acct('${a.id}','disable')">Disable</button>`}
           ${a.status === 'auth_error' ? `<button onclick="acct('${a.id}','enable')">Enable</button><button class="primary" onclick="relogin('${a.id}')">Re-login</button>` : ''}
@@ -424,10 +424,9 @@ async function loadStats() {
 }
 
 function canUseReset(a) {
-  if (a.backend !== 'codex' && a.backend !== 'claude') return false;
+  if (a.backend !== 'codex') return false;
   if (a.quota) return a.quota.banked_resets > 0;
-  if (a.backend === 'codex') return !!(a.usage && a.usage.available_resets > 0);
-  return !!(a.observation && a.observation.reset_credits > 0);
+  return !!(a.usage && a.usage.available_resets > 0);
 }
 
 function fmtRelative(ms) {

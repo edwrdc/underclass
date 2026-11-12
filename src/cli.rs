@@ -172,9 +172,9 @@ pub fn reset(args: &ResetArgs) -> Result<(), String> {
     let (client, url, token) = (&admin.client, &admin.url, &admin.token);
     let accounts = admin.accounts()?;
     let account = match_account(&accounts, &args.account)?;
-    if !matches!(account.backend.as_str(), "codex" | "claude") {
+    if account.backend != "codex" {
         return Err(format!(
-            "{} is a {} account; only ChatGPT/Codex and Claude Code accounts have banked resets",
+            "{} is a {} account; only ChatGPT/Codex accounts have redeemable banked resets",
             account.label, account.backend
         ));
     }

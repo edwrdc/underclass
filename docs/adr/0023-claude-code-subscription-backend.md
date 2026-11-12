@@ -87,8 +87,8 @@ credential.
 
 - **Quota is window-based, not bucket-based.** A Claude Code subscription has a 5-hour
   session window, a 7-day weekly window, and a weekly window scoped to one model family. The
-  account's own usage API (`GET /api/oauth/usage`) reports all three, plus the plan and the
-  banked rate-limit reset credits, so underclass reads an account's quota **without sending
+  account's own usage API (`GET /api/oauth/usage`) reports all three, plus the plan (banked
+  reset credits are not exposed; see ADR 0029), so underclass reads an account's quota **without sending
   anything that looks like a Claude Code request** - which keeps the credential usable only for
   the official client. The pool cools an account when a window is spent, and a window that is
   exhausted for one model family only blocks that model on that account.
@@ -373,6 +373,8 @@ later.") independently of the message API.
   operator's own subscription credit, so underclass never does it on its own. It reports how
   many credits an account holds, and redeems exactly one when the operator asks for it (the
   admin page's **Use reset** button, or `underclass reset <account>`).
+  *Note: superseded by [ADR 0029](0029-normalized-quota-view.md). The reset-credits endpoint does
+  not exist for OAuth tokens, so Claude banked resets are neither shown nor redeemable here.*
 
 ## Risks
 

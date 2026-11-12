@@ -4,6 +4,8 @@
 
 Accepted
 
+Note: Claude Code banked resets are not redeemable through OAuth; see [ADR 0029](0029-normalized-quota-view.md). This ADR covers Codex only.
+
 ## Context
 
 ADR 0013 redeems a banked Codex reset only when a live request finds the whole Codex pool exhausted, and it picks the account by latest natural recovery. Operators sometimes want to spend a credit on a specific account outside that trigger: before a session starts, on an account that is cooling while other Codex accounts are still healthy, or when automatic redemption is disabled. Until now the only way was to call the upstream `rate-limit-reset-credits/consume` endpoint by hand with a token copied out of `pool.db`, which bypasses the proxy's idempotency record, its health readmission, and the no-secret-handling rule.

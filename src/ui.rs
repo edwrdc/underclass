@@ -443,8 +443,9 @@ pub struct ResetQuery {
 
 /// @cc [owner:ghuntley,label:pool] manual-reset-endpoint-outcomes
 /// `reset_account` MUST return 404 for an unknown account id and otherwise delegate to
-/// `ResetManager::manual_reset` with the `force` query flag for a ChatGPT/Codex account, or to
-/// the Claude Code redemption path for a Claude account. Every non-2xx response MUST carry a
+/// `ResetManager::manual_reset` with the `force` query flag for a ChatGPT/Codex account, and MUST
+/// return 422 `unsupported` for a Claude account (its banked resets are not exposed to OAuth
+/// clients). Every non-2xx response MUST carry a
 /// JSON body with a stable `error` code and a human `message`; refusals that `force` can override
 /// (`not_rate_limited`, `already_redeemed`) and `no_credit` MUST be 409, `not_codex` 400, and
 /// upstream failures 502.
@@ -462,42 +463,14 @@ pub async fn reset_account(
             .into_response();
     };
     if account.backend == BackendId::Claude {
-        let token = match state.tokens.access_token(&account).await {
-            Ok(token) => token,
-            Err(e) => {
-                tracing::warn!(error = %e, "claude.reset.token_unavailable");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "upstream_error", "message": "no usable credential" })),
-                )
-                    .into_response();
-            }
-        };
-        return match crate::claude::manual_reset(
-            &state.client,
-            &account,
-            &token,
-            &state.pool,
-            &state.store,
-            query.force,
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "unsupported",
+                "message": "Claude banked resets are not exposed to OAuth clients; redeem them on claude.ai",
+            })),
         )
-        .await
-        {
-            Ok(outcome) => Json(json!({
-                "account_id": account.id,
-                "label": account.label,
-                "outcome": outcome.outcome,
-                "credit_id": outcome.credit_id,
-                "status": outcome.status,
-                "available_resets": outcome.available_resets,
-            }))
-            .into_response(),
-            Err(error) => (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": error.code(), "message": error.message() })),
-            )
-                .into_response(),
-        };
+            .into_response();
     }
     match state
         .resets
