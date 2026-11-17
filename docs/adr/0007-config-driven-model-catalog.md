@@ -11,6 +11,7 @@ The upstream Codex endpoint's model list changes without notice (new models like
 ## Decision
 
 - The proxy stores a per-backend catalog (SQLite `catalog` table, editable via the web UI). Defaults are seeded from the model lists observed in the opencode source; Copilot's catalog is refreshed from its live `/models` endpoint on boot and on account add.
+- The Codex catalog has no live source, so on every boot the proxy adds shipped defaults whose IDs the stored catalog lacks. It records the default IDs it has offered (config key `catalog_defaults_offered:codex`), so an operator's deletion is not undone and operator limit edits are never overwritten. An emptied catalog is reseeded in full.
 - `/v1/models` serves the **union** of backend catalogs (limits merged by max).
 - Routing eligibility is catalog-driven: a model is served by backends whose catalog contains it.
 - A model that appears in **no** catalog is treated as pass-through traffic and routed to the Codex backend, which upstream-validates. This makes new OpenAI models work with zero proxy changes.

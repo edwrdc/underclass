@@ -180,6 +180,31 @@ pub struct ModelInfo {
     pub output: i64,
 }
 
+/// @cc [owner:edwrdc,label:catalog] catalog-default-merge
+/// A stored catalog MUST gain every default model whose ID it lacks and that was never offered before.
+/// Stored entries MUST be kept unchanged, so operator limit edits survive.
+/// A default ID already in `offered` MUST NOT be re-added, so operator deletions survive.
+/// The returned offered set MUST be the union of `offered` and every default ID.
+pub fn merge_catalog_defaults(
+    stored: &[ModelInfo],
+    defaults: &[ModelInfo],
+    offered: &[String],
+) -> (Vec<ModelInfo>, Vec<String>) {
+    let mut merged = stored.to_vec();
+    let mut seen = offered.to_vec();
+    for model in defaults {
+        let already_offered = seen.iter().any(|id| id == &model.id);
+        let present = merged.iter().any(|m| m.id == model.id);
+        if !already_offered && !present {
+            merged.push(model.clone());
+        }
+        if !already_offered {
+            seen.push(model.id.clone());
+        }
+    }
+    (merged, seen)
+}
+
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub cache_key: String,
@@ -305,5 +330,38 @@ mod plan_tests {
         assert_eq!(account.plan_gate(), None);
         account.status = AccountStatus::Disabled;
         assert_eq!(account.plan_gate(), None);
+    }
+}
+
+#[cfg(test)]
+mod catalog_merge_tests {
+    use super::*;
+
+    fn model(id: &str, context: i64) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            name: id.into(),
+            context,
+            input: context,
+            output: 128_000,
+        }
+    }
+
+    #[test]
+    fn adds_new_defaults_keeps_edits_and_respects_deletions() {
+        let stored = vec![model("gpt-6-sol", 922_000)];
+        let defaults = vec![
+            model("gpt-6-sol", 272_000),
+            model("gpt-6-astra", 272_000),
+            model("gpt-6.1-sol", 500_000),
+        ];
+        // gpt-6-astra was offered earlier and the operator deleted it.
+        let offered = vec!["gpt-6-sol".to_string(), "gpt-6-astra".to_string()];
+        let (merged, seen) = merge_catalog_defaults(&stored, &defaults, &offered);
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-6-sol", "gpt-6.1-sol"]);
+        assert_eq!(merged[0].context, 922_000);
+        assert_eq!(merged[1].context, 500_000);
+        assert_eq!(seen, ["gpt-6-sol", "gpt-6-astra", "gpt-6.1-sol"]);
     }
 }

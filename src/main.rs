@@ -159,7 +159,7 @@ async fn async_serve(bind_override: Option<String>) -> Result<(), Box<dyn std::e
         },
     };
 
-    seed_catalog(&store, models::BackendId::Codex, codex::default_catalog());
+    merge_catalog_defaults(&store, models::BackendId::Codex, codex::default_catalog());
     seed_catalog(
         &store,
         models::BackendId::Copilot,
@@ -486,6 +486,33 @@ fn seed_catalog(
     if store.catalog(backend).is_empty() {
         store.set_catalog(backend, &defaults);
     }
+}
+
+/// Adds newly shipped defaults to a backend catalog that has no live source.
+/// Remembers offered IDs in config so operator deletions are not undone on restart.
+fn merge_catalog_defaults(
+    store: &store::Store,
+    backend: models::BackendId,
+    defaults: Vec<models::ModelInfo>,
+) {
+    let key = format!("catalog_defaults_offered:{}", backend.as_str());
+    let stored = store.catalog(backend);
+    let mut offered: Vec<String> = store
+        .config_get(&key)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if stored.is_empty() {
+        // An empty catalog is a fresh install or a cleared one: reseed fully.
+        offered.clear();
+    }
+    let (merged, offered) = models::merge_catalog_defaults(&stored, &defaults, &offered);
+    if merged.len() != stored.len() {
+        store.set_catalog(backend, &merged);
+    }
+    store.config_set(
+        &key,
+        &serde_json::to_string(&offered).expect("serialize offered ids"),
+    );
 }
 
 async fn refresh_copilot_catalogs_on_boot(state: &Arc<proxy::AppState>) {

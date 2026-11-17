@@ -1244,3 +1244,62 @@ fn test_codex_quota_used_is_always_a_fraction(tc: TestCase) {
     assert_eq!(view.windows.len(), 2);
     assert!(view.windows.iter().all(|w| (0.0..=1.0).contains(&w.used)));
 }
+
+#[hegel::test]
+fn test_catalog_default_merge_preserves_operator_state(tc: TestCase) {
+    use underclass::models::{ModelInfo, merge_catalog_defaults};
+    let to_models = |ids: Vec<u8>, context: i64| -> Vec<ModelInfo> {
+        let mut out: Vec<ModelInfo> = Vec::new();
+        for id in ids.into_iter().map(|n| format!("m{n}")) {
+            if !out.iter().any(|m| m.id == id) {
+                out.push(ModelInfo {
+                    id,
+                    name: String::new(),
+                    context,
+                    input: context,
+                    output: 0,
+                });
+            }
+        }
+        out
+    };
+    let stored = to_models(
+        tc.draw(gs::vecs(gs::integers::<u8>().max_value(12)).max_size(10)),
+        1,
+    );
+    let defaults = to_models(
+        tc.draw(gs::vecs(gs::integers::<u8>().max_value(12)).max_size(10)),
+        2,
+    );
+    let offered: Vec<String> = tc
+        .draw(gs::vecs(gs::integers::<u8>().max_value(12)).max_size(10))
+        .into_iter()
+        .map(|n| format!("m{n}"))
+        .collect();
+
+    let (merged, seen) = merge_catalog_defaults(&stored, &defaults, &offered);
+
+    // Stored entries are kept verbatim, in order, as a prefix.
+    assert!(merged.len() >= stored.len());
+    for (a, b) in stored.iter().zip(&merged) {
+        assert_eq!((&a.id, a.context), (&b.id, b.context));
+    }
+    // Every added entry is a default that was neither stored nor offered.
+    for m in &merged[stored.len()..] {
+        assert!(defaults.iter().any(|d| d.id == m.id));
+        assert!(!offered.contains(&m.id));
+        assert!(!stored.iter().any(|s| s.id == m.id));
+    }
+    // Every never-offered default ends up in the catalog.
+    for d in &defaults {
+        if !offered.contains(&d.id) {
+            assert!(merged.iter().any(|m| m.id == d.id));
+        }
+    }
+    // Offered set is the union; merging again is a no-op.
+    for id in offered.iter().chain(defaults.iter().map(|d| &d.id)) {
+        assert!(seen.contains(id));
+    }
+    let (again, _) = merge_catalog_defaults(&merged, &defaults, &seen);
+    assert_eq!(again.len(), merged.len());
+}
