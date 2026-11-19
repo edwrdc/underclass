@@ -157,7 +157,7 @@ Underclass accepts one hyphenated RFC4122 UUIDv4 and normalizes it to lowercase.
 
 ## Models
 
-The catalog is data, not code: seeded with the Codex families (`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-sol`), Copilot's live `/models` list, and the Claude families (`claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`, and the 5.x/4.x generations), refreshed live from Anthropic's `/v1/models` when a Claude account is added. Edit it in the UI or via the admin API; routing eligibility and the opencode model block follow it. Claude models are not part of the opencode provider block: the Anthropic surface is not OpenAI-shaped. See [ADR 0007](docs/adr/0007-config-driven-model-catalog.md).
+The catalog is seeded with Codex defaults, including `gpt-6.2-sol` and `gpt-6.2-astra`, Copilot's live `/models` list, and the Claude families (`claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`, and the 5.x/4.x generations), refreshed live from Anthropic's `/v1/models` when a Claude account is added. Edit it in the UI or via the admin API; routing eligibility and the opencode model block follow it. Claude models are not part of the opencode provider block: the Anthropic surface is not OpenAI-shaped. See [ADR 0007](docs/adr/0007-config-driven-model-catalog.md).
 
 ## Nix flake
 

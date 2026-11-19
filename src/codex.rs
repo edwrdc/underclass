@@ -455,9 +455,11 @@ impl Backend for CodexBackend {
 /// @cc [owner:edwrdc,label:catalog] codex-default-model-limits
 /// The default catalog MUST include GPT-6 Luna, GPT-6.1 Sol/Terra, and both Daybreak models.
 /// GPT-6.1 entries MUST advertise 500,000 context/input tokens and 128,000 output tokens.
+/// GPT-6.2 Sol and Astra MUST advertise 500,000 and 272,000 context/input tokens respectively,
+/// and 128,000 output tokens each.
 /// Existing older model IDs MUST remain available for clients that still select them.
 pub fn default_catalog() -> Vec<crate::models::ModelInfo> {
-    // Limits follow Codex Conversion 4.0.5's effective model catalog; older entries stay unchanged.
+    // Limits follow Codex Conversion's effective model catalog; older entries stay unchanged.
     // Use its contextWindow as the context/input ceiling, without adding the output allowance.
     let entries: &[(&str, &str, i64, i64, i64)] = &[
         ("gpt-5.4", "GPT-5.4", 400_000, 272_000, 128_000),
@@ -478,6 +480,8 @@ pub fn default_catalog() -> Vec<crate::models::ModelInfo> {
         ("gpt-6-sol", "GPT-6 Sol", 272_000, 272_000, 128_000),
         ("gpt-6.1-sol", "GPT-6.1 Sol", 500_000, 500_000, 128_000),
         ("gpt-6.1-terra", "GPT-6.1 Terra", 500_000, 500_000, 128_000),
+        ("gpt-6.2-sol", "GPT-6.2 Sol", 500_000, 500_000, 128_000),
+        ("gpt-6.2-astra", "GPT-6.2 Astra", 272_000, 272_000, 128_000),
         (
             "gpt-daybreak-blue-latest",
             "Daybreak Blue",
@@ -616,6 +620,8 @@ mod tests {
             ("gpt-6-sol", 272_000, 272_000),
             ("gpt-6.1-sol", 500_000, 500_000),
             ("gpt-6.1-terra", 500_000, 500_000),
+            ("gpt-6.2-sol", 500_000, 500_000),
+            ("gpt-6.2-astra", 272_000, 272_000),
             ("gpt-daybreak-blue-latest", 272_000, 272_000),
             ("gpt-daybreak-red-latest", 372_000, 372_000),
         ];
